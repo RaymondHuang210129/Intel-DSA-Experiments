@@ -126,6 +126,10 @@ int main(void) {
     printf("begin DSA operation\n");
     enqueue_descriptor(work_queue_portal, &default_descriptor,
                        &completion_record);
+
+    usleep(5000);
+    munmap(p, HUGEPAGE_SIZE_1GB);
+
     wait_result(&completion_record);
 
     if (completion_record.status == DSA_COMP_SUCCESS) {
