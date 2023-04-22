@@ -96,6 +96,15 @@ void check_result(unsigned char *data, unsigned char content) {
     printf("content match\n");
 }
 
+void check_possible_write_chunk_size(unsigned int bytes_completed) {
+    for (unsigned int i = 1; i <= 65536; i <<= 1) {
+        if (bytes_completed % (i << 1)) {
+            printf("possible write chunk size: %u\n", i);
+            break;
+        }
+    }
+}
+
 int main(void) {
     unsigned char *p = NULL;
     int rc = 0;
@@ -127,8 +136,12 @@ int main(void) {
     enqueue_descriptor(work_queue_portal, &default_descriptor,
                        &completion_record);
 
+    /**
+     * Do some changes during DSA execution
+     */
     usleep(5000);
-    munmap(p, HUGEPAGE_SIZE_1GB);
+    mprotect(p, ALLOCATED_SIZE, PROT_READ);
+    // munmap(p, HUGEPAGE_SIZE_1GB);
 
     wait_result(&completion_record);
 
@@ -139,6 +152,7 @@ int main(void) {
         if (op_status(completion_record.status) == DSA_COMP_PAGE_FAULT_NOBOF) {
             printf("DSA operation partially complete: %d\n",
                    completion_record.bytes_completed);
+            check_possible_write_chunk_size(completion_record.bytes_completed);
         } else {
             printf("desc failed status %u\n", completion_record.status);
         }
@@ -147,5 +161,5 @@ int main(void) {
 clean_up:
     munmap(p, HUGEPAGE_SIZE_1GB);
 mmap_failed:
-    return 0;
+    return rc;
 }

@@ -60,8 +60,9 @@
    sudo accel-config enable-wq dsa0/wq0.0
    ```
 
-### Build
+## Execute Test
 
 ```sh
-make intel_dsa_sample LDLIBS=-laccel-config
+make test LDLIBS=-laccel-config
+sudo ./test
 ```
