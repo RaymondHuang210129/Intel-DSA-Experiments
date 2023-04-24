@@ -137,10 +137,19 @@ int main(void) {
     }
 
     printf("the execution period is %llu\n", execution_duration);
-    munmap(p, ALLOCATED_SIZE);
 
     ulltime_t memory_access_interval = execution_duration / 16ULL;
     printf("set memory access interval: %llu\n", memory_access_interval);
+
+    ulltime_t sender_time_slots[SEND_BITS_COUNT];
+    for (int i = 0; i < SEND_BITS_COUNT; i++) {
+        sender_time_slots[i] = i * execution_duration;
+    }
+
+    ulltime_t receiver_time_slots[SEND_BITS_COUNT * 16ULL];
+    for (int i = 0; i < SEND_BITS_COUNT * 16ULL; i++) {
+        receiver_time_slots[i] = i * (execution_duration / 16ULL);
+    }
 
     sleep(1);
 
@@ -148,15 +157,7 @@ int main(void) {
 
     pid_t pid = fork();
     if (IS_SENDER(pid)) {
-        p = mmap(NULL, ALLOCATED_SIZE, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
         p[0] = 0x00;
-
-        ulltime_t time_slots[SEND_BITS_COUNT];
-        for (int i = 0; i < SEND_BITS_COUNT; i++) {
-            time_slots[i] = i * execution_duration;
-        }
-
         ulltime_t start_time = __rdtsc();
 
         // send bit 0, 1, 0, 1 ...
@@ -165,12 +166,14 @@ int main(void) {
             _mm_lfence();
             ulltime_t current_time = __rdtsc();
             _mm_lfence();
-            if (likely(current_time < start_time + time_slots[target_slot])) {
+            if (likely(current_time <
+                       start_time + sender_time_slots[target_slot])) {
                 // wait for next time slot to send a bit
                 continue;
-            } else if (current_time > start_time + time_slots[target_slot] &&
+            } else if (current_time >
+                           start_time + sender_time_slots[target_slot] &&
                        current_time <=
-                           start_time + time_slots[target_slot + 1]) {
+                           start_time + sender_time_slots[target_slot + 1]) {
                 // the correct time frame to send a bit
                 if (target_slot & 0x1) {
                     enqueue_descriptor(work_queue_portal, &default_descriptor,
@@ -187,14 +190,11 @@ int main(void) {
                 continue;
             }
         }
-        munmap(p, ALLOCATED_SIZE);
         wait(NULL);
 
     } else if (IS_RECEIVER(pid)) {
-        ulltime_t time_slots[SEND_BITS_COUNT * 16ULL];
-
         return 0;
     }
-
+    munmap(p, ALLOCATED_SIZE);
     return 0;
 }
