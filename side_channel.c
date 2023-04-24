@@ -151,6 +151,11 @@ int main(void) {
         receiver_time_slots[i] = i * (execution_duration / 16ULL);
     }
 
+    unsigned long long access_latency[SEND_BITS_COUNT * 16ULL] = {0};
+
+    unsigned char *p2 = (unsigned char *)malloc(sizeof(unsigned char));
+    _mm_clflush(p2);
+
     sleep(1);
 
     // fork parent and child process
@@ -158,11 +163,13 @@ int main(void) {
     pid_t pid = fork();
     if (IS_SENDER(pid)) {
         p[0] = 0x00;
+        _mm_lfence();
         ulltime_t start_time = __rdtsc();
+        _mm_lfence();
 
         // send bit 0, 1, 0, 1 ...
 
-        for (int target_slot = 0; target_slot < 100;) {
+        for (int target_slot = 0; target_slot < SEND_BITS_COUNT;) {
             _mm_lfence();
             ulltime_t current_time = __rdtsc();
             _mm_lfence();
@@ -170,9 +177,9 @@ int main(void) {
                        start_time + sender_time_slots[target_slot])) {
                 // wait for next time slot to send a bit
                 continue;
-            } else if (current_time >
+            } else if (current_time >=
                            start_time + sender_time_slots[target_slot] &&
-                       current_time <=
+                       current_time <
                            start_time + sender_time_slots[target_slot + 1]) {
                 // the correct time frame to send a bit
                 if (target_slot & 0x1) {
@@ -193,6 +200,49 @@ int main(void) {
         wait(NULL);
 
     } else if (IS_RECEIVER(pid)) {
+        unsigned char c = *p2;
+        _mm_lfence();
+        ulltime_t start_time = __rdtsc();
+        _mm_lfence();
+
+        // measure access latency
+        for (int target_slot = 0; target_slot < SEND_BITS_COUNT * 16ULL;) {
+            _mm_lfence();
+            ulltime_t current_time = __rdtsc();
+            _mm_lfence();
+            if (likely(current_time <
+                       start_time + receiver_time_slots[target_slot])) {
+                // wait for next time slot to measure latency
+                continue;
+            } else if (current_time >=
+                           start_time + receiver_time_slots[target_slot] &&
+                       current_time <
+                           start_time + receiver_time_slots[target_slot + 1]) {
+                // the correct time frame to measure latency
+                _mm_lfence();
+                ulltime_t time3 = __rdtsc();
+                _mm_lfence();
+                c = *p2;
+                _mm_lfence();
+                ulltime_t time4 = __rdtsc();
+                _mm_lfence();
+                _mm_clflush(p2);
+                access_latency[target_slot] = time4 - time3;
+                target_slot++;
+            } else {
+                // a time slot has expired but the latency is not measured.
+                // ignore this measurment
+                target_slot++;
+                continue;
+            }
+        }
+
+        printf("The latency of each measurement is:\n");
+        for (int i = 0; i < SEND_BITS_COUNT * 16ULL; i++) {
+            if (!(i % 16ULL)) printf("\n");
+            printf("%llu ", access_latency[i]);
+        }
+        printf("\n");
         return 0;
     }
     munmap(p, ALLOCATED_SIZE);
