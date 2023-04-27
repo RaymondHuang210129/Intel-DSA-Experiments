@@ -99,6 +99,7 @@ static uint8_t op_status(uint8_t status) {
 
 int main(void) {
     unsigned char *p = NULL;
+    unsigned char *p2 = NULL;
     int should_terminate = 1;
 
     // determine granularity
@@ -108,9 +109,13 @@ int main(void) {
 
     p = mmap(NULL, ALLOCATED_SIZE, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    p2 = mmap(NULL, ALLOCATED_SIZE, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
     p[0] = 0x00;
+    p2[0] = 0x00;
     void *work_queue_portal = get_wq_portal();
     struct dsa_completion_record completion_record __attribute__((aligned(32)));
+    struct dsa_completion_record completion_record2 __attribute__((aligned(32)));
     struct dsa_hw_desc default_descriptor = {
         .opcode = DSA_OPCODE_MEMFILL,
         .flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV,  // | IDXD_OP_FLAG_CC,
@@ -118,6 +123,14 @@ int main(void) {
         .pattern = 0xffffffffffffffff,
         .dst_addr = (uintptr_t)p,
         .completion_addr = (uintptr_t)&completion_record};
+
+    struct dsa_hw_desc default_descriptor2 = {
+        .opcode = DSA_OPCODE_MEMFILL,
+        .flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV,  // | IDXD_OP_FLAG_CC,
+        .xfer_size = ALLOCATED_SIZE >> 8,
+        .pattern = 0xffffffffffffffff,
+        .dst_addr = (uintptr_t)p2,
+        .completion_addr = (uintptr_t)&completion_record2};
 
     ulltime_t time1, time2, execution_duration = ULLONG_MAX;
 
@@ -153,7 +166,7 @@ int main(void) {
 
     unsigned long long access_latency[SEND_BITS_COUNT * 16ULL] = {0};
 
-    unsigned char *p2 = (unsigned char *)malloc(sizeof(unsigned char));
+    //unsigned char *p2 = (unsigned char *)malloc(sizeof(unsigned char));
     _mm_clflush(p2);
 
     sleep(1);
@@ -182,7 +195,7 @@ int main(void) {
                        current_time <
                            start_time + sender_time_slots[target_slot + 1]) {
                 // the correct time frame to send a bit
-                if (target_slot & 0x1) {
+                if (target_slot > 50 && (target_slot & 0x1) && !(target_slot & 0x110) /*(target_slot & 0x1) ^ ((target_slot & 0x100) >> 2)*/) {
                     enqueue_descriptor(work_queue_portal, &default_descriptor,
                                        &completion_record);
                     wait_result(&completion_record);
@@ -200,7 +213,8 @@ int main(void) {
         wait(NULL);
 
     } else if (IS_RECEIVER(pid)) {
-        unsigned char c = *p2;
+        void *work_queue_portal2 = get_wq_portal();
+        p2[0] = 0x00;
         _mm_lfence();
         ulltime_t start_time = __rdtsc();
         _mm_lfence();
@@ -222,11 +236,16 @@ int main(void) {
                 _mm_lfence();
                 ulltime_t time3 = __rdtsc();
                 _mm_lfence();
-                c = *p2;
+                enqueue_descriptor(work_queue_portal2, &default_descriptor2,
+                                   &completion_record2);
+                wait_result(&completion_record2);
+                if (unlikely(completion_record2.status != DSA_COMP_SUCCESS))
+                    if (op_status(completion_record2.status) == DSA_COMP_PAGE_FAULT_NOBOF)
+                        printf("DSA operation partially complete: %d\n",
+                               completion_record2.bytes_completed);
                 _mm_lfence();
                 ulltime_t time4 = __rdtsc();
                 _mm_lfence();
-                _mm_clflush(p2);
                 access_latency[target_slot] = time4 - time3;
                 target_slot++;
             } else {
