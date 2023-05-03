@@ -22,38 +22,60 @@
 
 typedef unsigned long long ulltime_t;
 
-static void *get_wq_portal(void) {
+struct Portals {
+    void *wq_portal_1;
+    void *wq_portal_2;
+};
+
+static struct Portals get_wq_portal(void) {
     void *wq_portal;
     struct accfg_ctx *ctx;
     struct accfg_wq *wq;
     struct accfg_device *device;
-    char path[PATH_MAX];
-    int fd;
+    char path[2][PATH_MAX];
+    int fd[2];
     int wq_found;
     accfg_new(&ctx);
+    int index = 0;
     accfg_device_foreach(ctx, device) {
         /* Use accfg_device_(*) functions to select enabled device
          * based on name, numa node
          */
         accfg_wq_foreach(device, wq) {
-            if (accfg_wq_get_user_dev_path(wq, path, sizeof(path))) continue;
+            if (accfg_wq_get_user_dev_path(wq, path[index],
+                                           sizeof(path[index])))
+                continue;
             /* Use accfg_wq_(*) functions select WQ of type
              * ACCFG_WQT_USER and desired mode
              */
             wq_found = accfg_wq_get_type(wq) == ACCFG_WQT_USER &&
                        accfg_wq_get_mode(wq) == ACCFG_WQ_SHARED;
-            if (wq_found) break;
+            if (wq_found) {
+                index++;
+                if (index >= 2) break;
+            }
         }
-        if (wq_found) break;
+        if (index >= 2) break;
     }
     accfg_unref(ctx);
-    if (!wq_found) return MAP_FAILED;
-    fd = open(path, O_RDWR);
-    if (fd < 0) return MAP_FAILED;
-    wq_portal = mmap(NULL, WQ_PORTAL_SIZE, PROT_WRITE,
-                     MAP_SHARED | MAP_POPULATE, fd, 0);
-    close(fd);
-    return wq_portal;
+    if (!wq_found) {
+        struct Portals null_portal = {NULL, NULL};
+        return null_portal;
+    }
+    fd[0] = open(path[0], O_RDWR);
+    fd[1] = open(path[1], O_RDWR);
+    if (fd < 0) {
+        struct Portals null_portal = {NULL, NULL};
+        return null_portal;
+    };
+    struct Portals portals = {
+        .wq_portal_1 = mmap(NULL, WQ_PORTAL_SIZE, PROT_WRITE,
+                            MAP_SHARED | MAP_POPULATE, fd[0], 0),
+        .wq_portal_2 = mmap(NULL, WQ_PORTAL_SIZE, PROT_WRITE,
+                            MAP_SHARED | MAP_POPULATE, fd[1], 0)};
+    close(fd[0]);
+    close(fd[1]);
+    return portals;
 }
 
 static void put_wq_portal(void *p) { munmap(p, WQ_PORTAL_SIZE); }
@@ -93,12 +115,12 @@ static uint8_t op_status(uint8_t status) {
 }
 
 #define HUGEPAGE_SIZE_1GB 1073741824
-#define ALLOCATED_SIZE HUGEPAGE_SIZE_1GB
+#define ALLOCATED_SIZE HUGEPAGE_SIZE_1GB >> 11
+#define SENDER_TIME_OFFSET 410000000
 
-#define SEND_BITS_COUNT 100
+#define SEND_BITS_COUNT 1600
 
 int main(void) {
-    unsigned char *p = NULL;
     int should_terminate = 1;
 
     // determine granularity
@@ -106,28 +128,41 @@ int main(void) {
     printf("measure the execution duration of each dsa operation\n");
     _mm_lfence();
 
-    p = mmap(NULL, ALLOCATED_SIZE, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-    p[0] = 0x00;
-    void *work_queue_portal = get_wq_portal();
-    struct dsa_completion_record completion_record __attribute__((aligned(32)));
-    struct dsa_hw_desc default_descriptor = {
+    unsigned char *p1 = mmap(NULL, HUGEPAGE_SIZE_1GB, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    unsigned char *p2 = mmap(NULL, HUGEPAGE_SIZE_1GB, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    struct Portals portals = get_wq_portal();
+    struct dsa_completion_record completion_record_1
+        __attribute__((aligned(32)));
+    struct dsa_completion_record completion_record_2
+        __attribute__((aligned(32)));
+    struct dsa_hw_desc default_descriptor_1 = {
         .opcode = DSA_OPCODE_MEMFILL,
         .flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV,  // | IDXD_OP_FLAG_CC,
         .xfer_size = ALLOCATED_SIZE,
         .pattern = 0xffffffffffffffff,
-        .dst_addr = (uintptr_t)p,
-        .completion_addr = (uintptr_t)&completion_record};
+        .dst_addr = (uintptr_t)p1,
+        .completion_addr = (uintptr_t)&completion_record_1};
+    struct dsa_hw_desc default_descriptor_2 = {
+        .opcode = DSA_OPCODE_MEMFILL,
+        .flags = IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_CRAV,  // | IDXD_OP_FLAG_CC,
+        .xfer_size = ALLOCATED_SIZE >> 5,
+        .pattern = 0xffffffffffffffff,
+        .dst_addr = (uintptr_t)p2,
+        .completion_addr = (uintptr_t)&completion_record_2};
 
     ulltime_t time1, time2, execution_duration = ULLONG_MAX;
+    p1[0] = 0x00;
+    p2[0] = 0x00;
 
     for (int i = 0; i < 50; i++) {
         _mm_lfence();
-        enqueue_descriptor(work_queue_portal, &default_descriptor,
-                           &completion_record);
+        enqueue_descriptor(portals.wq_portal_1, &default_descriptor_1,
+                           &completion_record_1);
         _mm_lfence();
         time1 = __rdtsc();
-        wait_result(&completion_record);
+        wait_result(&completion_record_1);
         _mm_lfence();
         time2 = __rdtsc();
         execution_duration = execution_duration > time2 - time1
@@ -143,7 +178,7 @@ int main(void) {
 
     ulltime_t sender_time_slots[SEND_BITS_COUNT];
     for (int i = 0; i < SEND_BITS_COUNT; i++) {
-        sender_time_slots[i] = i * execution_duration;
+        sender_time_slots[i] = i * execution_duration + SENDER_TIME_OFFSET;
     }
 
     ulltime_t receiver_time_slots[SEND_BITS_COUNT * 16ULL];
@@ -153,16 +188,14 @@ int main(void) {
 
     unsigned long long access_latency[SEND_BITS_COUNT * 16ULL] = {0};
 
-    unsigned char *p2 = (unsigned char *)malloc(sizeof(unsigned char));
-    _mm_clflush(p2);
-
     sleep(1);
 
     // fork parent and child process
 
     pid_t pid = fork();
     if (IS_SENDER(pid)) {
-        p[0] = 0x00;
+        portals = get_wq_portal();
+        p1[0] = 0x0;
         _mm_lfence();
         ulltime_t start_time = __rdtsc();
         _mm_lfence();
@@ -182,11 +215,14 @@ int main(void) {
                        current_time <
                            start_time + sender_time_slots[target_slot + 1]) {
                 // the correct time frame to send a bit
-                if (target_slot & 0x1) {
-                    enqueue_descriptor(work_queue_portal, &default_descriptor,
-                                       &completion_record);
-                    wait_result(&completion_record);
-                    if (unlikely(completion_record.status != DSA_COMP_SUCCESS))
+                unsigned int tmp = target_slot % 16;
+                if (tmp == 0 || tmp == 6 || tmp == 10 || tmp == 12) {
+                    enqueue_descriptor(portals.wq_portal_1,
+                                       &default_descriptor_1,
+                                       &completion_record_1);
+                    wait_result(&completion_record_1);
+                    if (unlikely(completion_record_1.status !=
+                                 DSA_COMP_SUCCESS))
                         printf("dsa operation failed\n");
                 }
                 target_slot++;
@@ -200,13 +236,15 @@ int main(void) {
         wait(NULL);
 
     } else if (IS_RECEIVER(pid)) {
-        unsigned char c = *p2;
+        portals = get_wq_portal();
+        p2[0] = 0x0;
         _mm_lfence();
         ulltime_t start_time = __rdtsc();
         _mm_lfence();
 
         // measure access latency
-        for (int target_slot = 0; target_slot < SEND_BITS_COUNT * 16ULL;) {
+        for (unsigned int target_slot = 0;
+             target_slot < SEND_BITS_COUNT * 16ULL;) {
             _mm_lfence();
             ulltime_t current_time = __rdtsc();
             _mm_lfence();
@@ -222,11 +260,14 @@ int main(void) {
                 _mm_lfence();
                 ulltime_t time3 = __rdtsc();
                 _mm_lfence();
-                c = *p2;
+                enqueue_descriptor(portals.wq_portal_2, &default_descriptor_2,
+                                   &completion_record_2);
+                wait_result(&completion_record_2);
+                if (unlikely(completion_record_2.status != DSA_COMP_SUCCESS))
+                    printf("dsa operation failed\n");
                 _mm_lfence();
                 ulltime_t time4 = __rdtsc();
                 _mm_lfence();
-                _mm_clflush(p2);
                 access_latency[target_slot] = time4 - time3;
                 target_slot++;
             } else {
@@ -245,6 +286,7 @@ int main(void) {
         printf("\n");
         return 0;
     }
-    munmap(p, ALLOCATED_SIZE);
+    munmap(p1, ALLOCATED_SIZE);
+    munmap(p2, ALLOCATED_SIZE);
     return 0;
 }
