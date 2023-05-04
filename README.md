@@ -60,9 +60,14 @@
    sudo accel-config enable-wq dsa0/wq0.0
    ```
 
+   Or config via file:
+   ```sh
+   sudo accel-config load-config -c net_profile.conf -e
+   ```
+
 ## Execute Test
 
 ```sh
-make test LDLIBS=-laccel-config
-sudo ./test
+make side_channel LDLIBS=-laccel-config
+sudo ./side_channel
 ```
