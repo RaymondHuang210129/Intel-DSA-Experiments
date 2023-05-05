@@ -65,9 +65,20 @@
    sudo accel-config load-config -c net_profile.conf -e
    ```
 
-## Execute Test
+## Execute Experiment
+### Memory Integrity Experiment
+```sh
+make test LDLIBS=-laccel-config
+sudo ./test
+```
 
+### Confidentiality Experiment
+#### Run Experiment
 ```sh
 make side_channel LDLIBS=-laccel-config
-sudo ./side_channel
+sudo ./side_channel > side_channel.log
+```
+#### Scatter graph
+```sh
+python3 output.py
 ```
